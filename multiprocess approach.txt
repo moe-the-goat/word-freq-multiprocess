@@ -1,0 +1,215 @@
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <sys/time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+
+#define MAX_WORD_LENGTH 70
+
+typedef struct {
+    char word[MAX_WORD_LENGTH];
+    int frequency;
+} WordArray;
+
+// Mutex for synchronization
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Merge function for merge sort
+void merge(WordArray *arr, int left, int mid, int right) {
+    int n1 = mid - left + 1;
+    int n2 = right - mid;
+
+    WordArray *L = malloc(n1 * sizeof(WordArray));
+    WordArray *R = malloc(n2 * sizeof(WordArray));
+
+    for (int i = 0; i < n1; i++) {
+        L[i] = arr[left + i];
+    }
+    for (int j = 0; j < n2; j++) {
+        R[j] = arr[mid + 1 + j];
+    }
+
+    int i = 0, j = 0, k = left;
+    while (i < n1 && j < n2) {
+        if (L[i].frequency >= R[j].frequency) {
+            arr[k] = L[i];
+            i++;
+        } else {
+            arr[k] = R[j];
+            j++;
+        }
+        k++;
+    }
+
+    while (i < n1) {
+        arr[k] = L[i];
+        i++;
+        k++;
+    }
+    while (j < n2) {
+        arr[k] = R[j];
+        j++;
+        k++;
+    }
+
+    free(L);
+    free(R);
+}
+
+void mergeSort(WordArray *arr, int left, int right) {
+    if (left < right) {
+        int mid = left + (right - left) / 2;
+        mergeSort(arr, left, mid);
+        mergeSort(arr, mid + 1, right);
+        merge(arr, left, mid, right);
+    }
+}
+
+// Print top 10 most frequent words
+void printTop10(WordArray *arr, int size) {
+    printf("Top 10 Most Frequent Words:\n");
+    int printed = 0;
+    for (int i = 0; i < size && printed < 10; i++) {
+        if (arr[i].frequency > 0) { // Avoid printing empty entries
+            printf("%s: %d\n", arr[i].word, arr[i].frequency);
+            printed++;
+        }
+    }
+}
+
+
+// Count word frequencies in a chunk
+void countFrequencyChunk(WordArray **words, int *wordCount, const char *chunk, long chunkSize) {
+    char buffer[MAX_WORD_LENGTH];
+    int capacity = 10;
+    *words = malloc(capacity * sizeof(WordArray));
+    if (!*words) {
+        perror("Error allocating memory");
+        exit(1);
+    }
+    *wordCount = 0;
+
+    char *chunkCopy = strndup(chunk, chunkSize); // Create a mutable copy of the chunk
+    char *token = strtok(chunkCopy, " \n");
+    while (token != NULL) {
+        int found = 0;
+
+        for (int i = 0; i < *wordCount; i++) {
+            if (strcmp((*words)[i].word, token) == 0) {
+                (*words)[i].frequency++;
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            if (*wordCount == capacity) {
+                capacity *= 2;
+                WordArray *temp = realloc(*words, capacity * sizeof(WordArray));
+                if (!temp) {
+                    perror("Error reallocating memory");
+                    free(*words);
+                    exit(1);
+                }
+                *words = temp;
+            }
+
+            strncpy((*words)[*wordCount].word, token, MAX_WORD_LENGTH - 1);
+            (*words)[*wordCount].word[MAX_WORD_LENGTH - 1] = '\0';
+            (*words)[*wordCount].frequency = 1;
+            (*wordCount)++;
+        }
+
+        token = strtok(NULL, " \n");
+    }
+
+    free(chunkCopy);
+}
+
+// Divide work among child processes
+void divideArray(WordArray *sharedMemory, const char *fileContent, long totalSize, int numChildren) {
+    long chunkSize = totalSize / numChildren;
+
+    for (int i = 0; i < numChildren; i++) {
+        int pid = fork();
+        if (pid == 0) {
+            long start = i * chunkSize;
+            long end = (i == numChildren - 1) ? totalSize : start + chunkSize;
+
+            WordArray *localWords;
+            int localCount = 0;
+
+            countFrequencyChunk(&localWords, &localCount, fileContent + start, end - start);
+
+            // Copy local results to shared memory
+            long offset = i * (totalSize / numChildren / MAX_WORD_LENGTH); // Separate memory for each child
+            memcpy(sharedMemory + offset, localWords, localCount * sizeof(WordArray));
+
+            free(localWords);
+            exit(0);
+        }
+    }
+
+    for (int i = 0; i < numChildren; i++) {
+        wait(NULL);
+    }
+}
+
+int main(int argc, char *argv[]) {
+    struct timeval start, end;
+    double duration;
+    gettimeofday(&start, NULL);
+
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <file_name> <num_children>\n", argv[0]);
+        return 1;
+    }
+
+    const char *fileName = argv[1];
+    int numChildren = atoi(argv[2]);
+
+    FILE *file = fopen(fileName, "r");
+    if (!file) {
+        perror("Error opening file");
+        return 1;
+    }
+
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    rewind(file);
+
+    char *fileContent = malloc(fileSize + 1);
+    fread(fileContent, 1, fileSize, file);
+    fclose(file);
+    fileContent[fileSize] = '\0';
+
+    // Allocate shared memory for results
+    WordArray *sharedMemory = mmap(NULL, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (sharedMemory == MAP_FAILED) {
+        perror("mmap");
+        return 1;
+    }
+
+    divideArray(sharedMemory, fileContent, fileSize, numChildren);
+
+    WordArray *combinedResults = malloc(fileSize / MAX_WORD_LENGTH * sizeof(WordArray));
+    memcpy(combinedResults, sharedMemory, fileSize / MAX_WORD_LENGTH * sizeof(WordArray));
+
+    mergeSort(combinedResults, 0, fileSize / MAX_WORD_LENGTH - 1);
+    printTop10(combinedResults, fileSize / MAX_WORD_LENGTH);
+
+    munmap(sharedMemory, fileSize);
+    free(fileContent);
+    free(combinedResults);
+
+    gettimeofday(&end, NULL);
+    duration = (end.tv_sec - start.tv_sec) * 1000000.0;
+    duration += (end.tv_usec - start.tv_usec);
+    printf("\n%f minutes\n", duration / 60000000.0);
+
+    pthread_mutex_destroy(&mutex); // Clean up mutex
+    return 0;
+}
