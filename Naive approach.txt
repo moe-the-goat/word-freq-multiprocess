@@ -1,0 +1,154 @@
+#include <sys/time.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#define MAX_WORD_LENGTH 70
+
+typedef struct {
+    char word[MAX_WORD_LENGTH];
+    int frequency;
+} WordArray;
+
+// Function to merge two sorted halves of the array
+void merge(WordArray *words, int left, int mid, int right) {
+    int n1 = mid - left + 1;
+    int n2 = right - mid;
+
+    WordArray *L = malloc(n1 * sizeof(WordArray));
+    WordArray *R = malloc(n2 * sizeof(WordArray));
+
+    for (int i = 0; i < n1; i++) {
+        L[i] = words[left + i];
+    }
+    for (int j = 0; j < n2; j++) {
+        R[j] = words[mid + 1 + j];
+    }
+
+    // Merge the temporary arrays back into the original array words[]
+    int i = 0, j = 0, k = left;
+    while (i < n1 && j < n2) {
+        if (L[i].frequency >= R[j].frequency) {
+            words[k] = L[i];
+            i++;
+        } else {
+            words[k] = R[j];
+            j++;
+        }
+        k++;
+    }
+
+    while (i < n1) {
+        words[k] = L[i];
+        i++;
+        k++;
+    }
+
+    while (j < n2) {
+        words[k] = R[j];
+        j++;
+        k++;
+    }
+
+    // Free temporary arrays
+    free(L);
+    free(R);
+}
+
+// Function to implement merge sort
+void mergeSort(WordArray *words, int left, int right) {
+    if (left < right) {
+        int mid = left + (right - left) / 2;
+
+        // Sort first and second halves
+        mergeSort(words, left, mid);
+        mergeSort(words, mid + 1, right);
+
+        // Merge the sorted halves
+        merge(words, left, mid, right);
+    }
+}
+
+// Function to count word frequencies in the given file
+void countFrequency(const char *fileName) {
+    WordArray *words = NULL;
+    int wordCount = 0;
+    int capacity = 10;
+    char buffer[MAX_WORD_LENGTH];
+
+    words = malloc(capacity * sizeof(WordArray));
+    if (!words) {
+        perror("Error allocating memory");
+        exit(1);
+    }
+
+    FILE *file = fopen(fileName, "r");
+    if (!file) {
+        perror("Error opening file");
+        free(words);
+        exit(1);
+    }
+
+    // Read words from the file and count their frequencies
+    while (fscanf(file, "%69s", buffer) != EOF) {
+        int found = 0;
+        for (int i = 0; i < wordCount; i++) {
+            if (strcmp(words[i].word, buffer) == 0) {
+                words[i].frequency++;
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            // If the array is full, double its capacity
+            if (wordCount == capacity) {
+                capacity *= 2;
+                WordArray *temp = realloc(words, capacity * sizeof(WordArray));
+                if (!temp) {
+                    perror("Error reallocating memory");
+                    free(words);
+                    fclose(file);
+                    exit(1);
+                }
+                words = temp;
+            }
+
+            // Add the new word
+            strncpy(words[wordCount].word, buffer, MAX_WORD_LENGTH - 1);
+            words[wordCount].word[MAX_WORD_LENGTH - 1] = '\0';
+            words[wordCount].frequency = 1;
+            wordCount++;
+        }
+    }
+
+    fclose(file);
+
+    // Sort and print the top 10 most frequent words
+    mergeSort(words, 0, wordCount - 1);
+    printf("Top 10 Most Frequent Words:\n");
+    for (int i = 0; i < 10 && i < wordCount; i++) {
+        printf("%s: %d\n", words[i].word, words[i].frequency);
+    }
+
+    free(words);
+}
+
+int main(int argc, char *argv[]) {
+    struct timeval start, end;
+    double duration;
+
+    gettimeofday(&start, NULL);
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <file_name>\n", argv[0]);
+        return 1;
+    }
+
+    countFrequency(argv[1]);
+
+    gettimeofday(&end, NULL);
+    duration = (end.tv_sec - start.tv_sec) * 1000000.0;
+    duration += (end.tv_usec - start.tv_usec);
+    printf("\n%f minutes\n", duration / 60000000.0);
+    return 0;
+}
